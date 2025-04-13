@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
     ports:
-      - "5432:5432"
+      - "5432:5432"  # Exposed to all interfaces by default
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init-scripts:/docker-entrypoint-initdb.d
@@ -19,10 +19,17 @@ services:
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     networks:
       - postgres_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres_data:
+    name: nawabii-postgres-data
 
 networks:
   postgres_network:
     driver: bridge
+    name: nawabii-network

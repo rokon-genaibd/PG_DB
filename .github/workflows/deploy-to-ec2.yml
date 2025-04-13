@@ -1,9 +1,11 @@
-name: Deploy to EC2
+name: Deploy PostgreSQL to EC2
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    # Manual trigger
 
 env:
   AWS_HOST: ${{ secrets.AWS_HOST }}
@@ -30,47 +32,75 @@ jobs:
       - name: Deploy to EC2
         run: |
           # Ensure the target directory exists
-          ssh ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }} "mkdir -p /home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB"
+          ssh ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }} "mkdir -p /home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB/config /home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB/init-scripts"
 
           # Copy necessary files to EC2
-          scp -r ./init-scripts ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }}:/home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB/
-          scp -r ./config ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }}:/home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB/
+          scp -r ./init-scripts/* ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }}:/home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB/init-scripts/
+          scp -r ./config/* ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }}:/home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB/config/
           scp ./.env ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }}:/home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB/
           scp ./docker-compose.yml ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }}:/home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB/
           scp ./setup.sh ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }}:/home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB/
 
           # Execute setup on EC2
           ssh ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }} "
-            # Ensure Docker and Docker Compose are installed
+            # Ensure Docker is installed
             if ! command -v docker &> /dev/null; then
               echo 'Docker not found, installing...'
               sudo apt-get update
-              sudo apt-get install -y docker.io
+              sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+              sudo add-apt-repository \"deb [arch=amd64] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\"
+              sudo apt-get update
+              sudo apt-get install -y docker-ce
               sudo systemctl start docker
               sudo systemctl enable docker
             fi
             
+            # Ensure Docker Compose is installed
             if ! command -v docker-compose &> /dev/null; then
               echo 'Docker Compose not found, installing...'
-              sudo curl -L \"https://github.com/docker/compose/releases/download/v2.5.0/docker-compose-$(uname -s)-$(uname -m)\" -o /usr/local/bin/docker-compose
+              sudo curl -L \"https://github.com/docker/compose/releases/download/v2.18.1/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
               sudo chmod +x /usr/local/bin/docker-compose
+              sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
             fi
             
             # Add user to docker group if not already
             if ! groups \$USER | grep -q docker; then
               sudo usermod -aG docker \$USER
-              echo 'Added user to docker group, you may need to log out and back in for this to take effect'
+              echo 'Added user to docker group'
             fi
             
-            # Run the setup script
+            # Make setup script executable
             cd /home/${{ secrets.AWS_USERNAME }}/Desktop/PG_DB
             chmod +x setup.sh
             
-            # Stop and remove existing containers if they exist
-            docker-compose down
+            # Run the setup script
+            ./setup.sh
             
-            # Start up the new containers
-            docker-compose up -d
+            # Verify container status
+            docker ps --format '{{.Names}}: {{.Status}}' | grep nawabii-postgres
             
             echo 'PostgreSQL Docker deployment completed'
+          "
+
+      - name: Verify PostgreSQL Accessibility
+        run: |
+          ssh ${{ secrets.AWS_USERNAME }}@${{ secrets.AWS_HOST }} "
+            # Wait a moment for PostgreSQL to fully initialize
+            sleep 5
+            
+            # Check if PostgreSQL is running
+            if docker exec nawabii-postgres pg_isready -U rokon -d nawabii; then
+              echo '✅ PostgreSQL is running and accessible!'
+            else
+              echo '❌ PostgreSQL is not responding properly!'
+              docker logs nawabii-postgres --tail 50
+              exit 1
+            fi
+            
+            # Get server's public IP
+            PUBLIC_IP=\$(curl -s http://checkip.amazonaws.com || echo 'unknown')
+            echo \"PostgreSQL is available at: \$PUBLIC_IP:5432\"
+            echo \"Database: nawabii\"
+            echo \"User: rokon\"
           "
